@@ -1,0 +1,282 @@
+#cloud-config
+
+# Installation Information
+
+# https://gist.github.com/mmitchel/4ca91fe57c21189476b9af4ae2a60893
+
+### USER DEFINED ###########################################
+
+# apt:
+#   http_proxy: 'http://windows_user:windows_password@10.63.136.30:8080/'
+
+### INSTANCE SPECIFIC ######################################
+
+locale: en_US.UTF-8
+
+users:
+
+  - name: user
+    gecos: WSL Instance
+    plain_text_passwd: password
+    groups: [adm,dialout,disk,cdrom,floppy,sudo,audio,dip,video,plugdev,netdev]
+    shell: /bin/bash
+    homedir: /home/user
+    sudo: ['ALL=(ALL) NOPASSWD: ALL']
+
+write_files:
+
+  # Overwrite the original
+  - path: /etc/wsl.conf
+    owner: 'root:root'
+    permissions: '0644'
+    defer: false
+    append: false
+    content: |
+      [boot]
+      systemd=true
+      [user]
+      default=user
+      [automount]
+      enabled=true
+      mountFsTab=true
+      options="case=off,fmask=0077,dmask=0077"
+      [network]
+      hostname=wsl
+      [interop]
+      enabled=true
+      appendWindowsPath=true
+      [time]
+      useWindowsTimezone=true
+
+  # Overwrite the original
+  - path: /etc/wsl-distribution.conf
+    owner: 'root:root'
+    permissions: '0644'
+    defer: false
+    append: false
+    content: |
+      [oobe]
+      command = /usr/lib/wsl/wsl-setup
+      defaultUid = 1000
+      defaultName = Ubuntu-24.04
+      [shortcut]
+      icon = /usr/share/wsl/ubuntu.ico
+      [windowsterminal]
+      ProfileTemplate = /usr/share/wsl/terminal-profile.json
+
+  # Overwrite the original
+  - path: /usr/lib/wsl/wsl-setup
+    owner: 'root:root'
+    permissions: '0755'
+    defer: false
+    append: false
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      echo "Provisioning the new WSL instance $WSL_DISTRO_NAME"
+      echo "This might take a while..."
+      # Wait for cloud-init to finish if systemd and its service is enabled
+      # by running the script located at the same dir as this one.
+      this_dir=$(dirname "$(realpath $0)")
+      source "${this_dir}/wait-for-cloud-init"
+
+    # Overwrite the original
+  - path: /usr/lib/wsl/wait-for-cloud-init
+    owner: 'root:root'
+    permissions: '0755'
+    defer: false
+    append: false
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      if status=$(LANG=C systemctl is-system-running 2>/dev/null) || [ "${status}" != "offline" ] && systemctl is-enabled --quiet cloud-init-local.service 2>/dev/null; then
+        cloud-init status --wait > /dev/null 2>&1 || true
+        touch /etc/cloud/cloud-init.disabled || true
+      fi
+
+  - path: /etc/profile.d/wsl-instance.sh
+    owner: 'root:root'
+    permissions: '0644'
+    content: |
+      # WSL Instance
+      if [ "$USER" != "root" ] ; then
+        if [ -n "$USERPROFILE" ] ; then
+          if [ -d "$USERPROFILE" ] ; then
+            mkdir -p "$USERPROFILE/.config" && ln -sf "$USERPROFILE/.config" $HOME/.config && rm -f $HOME/.config/.config
+            mkdir -p "$USERPROFILE/.gnupg" && ln -sf "$USERPROFILE/.gnupg" $HOME/.gnupg && rm -f $HOME/.gnupg/.gnupg
+            mkdir -p "$USERPROFILE/.local/bin"
+            export PATH="$USERPROFILE/.local/bin:$PATH"
+            [[ -d $HOME/.ssh && ! -h $HOME/.ssh ]] && mv -f $HOME/.ssh $HOME/.ssh.old
+            mkdir -p "$USERPROFILE/.ssh" && ln -sf "$USERPROFILE/.ssh" $HOME/.ssh && rm -f $HOME/.ssh/.ssh
+            touch "$USERPROFILE/.netrc" && ln -sf "$USERPROFILE/.netrc" $HOME/.netrc
+            touch "$USERPROFILE/.s3cfg" && ln -sf "$USERPROFILE/.s3cfg" $HOME/.s3cfg
+            rm -fr $HOME/.config/systemd/user
+            rm -fr $HOME/.config/systemd/user.control
+          fi
+        fi
+      fi
+
+  - path: /etc/sysctl.d/wsl-instance.conf
+    owner: 'root:root'
+    permissions: '0644'
+    content: |
+      fs.inotify.max_user_watches = 524288
+
+  - path: /etc/smbcredentials
+    owner: 'root:root'
+    permissions: '0600'
+    content: |
+      username=windows_user
+      password=windows_password
+
+  - path: /etc/udev/rules.d/dm-control.rules
+    owner: 'root:root'
+    permissions: '0644'
+    content: |
+      # Allow members of the 'disk' group to access device-mapper control device
+      # This enables non-root LVM operations when user is in 'disk' group
+      # https://udev.freedesktop.org/
+      # NOTE: Must run early before device-mapper subsystem initializes
+
+      # device-mapper control device (character device)
+      SUBSYSTEM=="misc", KERNEL=="mapper/control", GROUP="disk", MODE="0660"
+      KERNEL=="mapper/control", GROUP="disk", MODE="0660"
+
+      # All device-mapper devices (block devices)
+      SUBSYSTEM=="block", KERNEL=="dm-*", GROUP="disk", MODE="0660"
+      KERNEL=="dm-*", GROUP="disk", MODE="0660"
+
+      # device-mapper character devices
+      SUBSYSTEM=="char", KERNEL=="device-mapper", GROUP="disk", MODE="0660"
+
+      # Loop devices (already covered by other rules but included for completeness)
+      KERNEL=="loop[0-9]*", GROUP="disk", MODE="0660"
+      SUBSYSTEM=="block", KERNEL=="loop[0-9]*", GROUP="disk", MODE="0660"
+
+  - path: /etc/tmpfiles.d/dm-control.conf
+    owner: 'root:root'
+    permissions: '0644'
+    content: |
+      z /dev/mapper/control 0660 root disk - -
+
+  - path: /etc/containers/nodocker
+    owner: 'root:root'
+    permissions: '0644'
+    content: |
+      suppress podman message
+
+  - path: //etc/systemd/system/make-root-rshared.service
+    owner: 'root:root'
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Make root mount rshared for rootless containers
+      DefaultDependencies=no
+      After=local-fs.target
+      Before=multi-user.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/mount --make-rshared /
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+
+mounts:
+  - ["# C:","/mnt/c","drvfs","defaults,nosuid,nodev,x-mount.mkdir","0","0"]
+  - ["# M:","/mnt/m","drvfs","defaults,nosuid,nodev,x-mount.mkdir","0","0"]
+  - ["# /src/path","/mnt/bind","none","bind,defaults,x-mount.mkdir","0","0"]
+  - ["# //10.236.1.99/share","/mnt/share","cifs","credentials=/etc/smbcredentials,nosuid,nodev,x-mount.mkdir","0","0" ]
+
+package_reboot_if_required: true
+package_update: true
+package_upgrade: true
+
+packages:
+
+  # Development
+  - build-essential
+  - chrpath
+  - cpio
+  - diffstat
+  - file
+  - gawk
+  - git
+  - git-lfs
+  - iputils-ping
+  - libacl1
+  - liblz4-tool
+  - locales
+  - python3
+  - python3-git
+  - python3-jinja2
+  - python3-pexpect
+  - python3-pip
+  - python3-subunit
+  - socat
+  - texinfo
+  - unzip
+  - wget
+  - xz-utils
+  - zstd
+
+  # General
+  # - wslu
+  - curl
+  - gh
+  - gnupg2
+  - htop
+  - jq
+  - pciutils
+  - usbutils
+  - python3-paho-mqtt
+  - python3-serial
+  - python3-serial-asyncio
+  - python3-paramiko
+  - python3-venv
+  - repo
+  - uidmap
+  - libxml2-utils
+
+  # Containers
+  - podman
+  - podman-docker
+  - podman-compose
+  - podman-toolbox
+
+  # Disk and Filesystem
+  - rsync
+  - s3cmd
+  - dosfstools
+  - e2fsprogs
+  - btrfs-progs
+  - cryptsetup
+  - ostree
+  - cifs-utils
+  - parted
+  - lvm2
+
+runcmd:
+
+  # Setup repo tool
+  - |
+    mkdir -p /usr/local/bin
+    curl https://storage.googleapis.com/git-repo-downloads/repo > /usr/local/bin/repo
+    chmod a+rwx /usr/local/bin/repo
+
+  # Setup ~user
+  - |
+    rsync -av /etc/skel/ /home/user/
+    touch /home/user/.hushlogin
+    chown -R user:user /home/user
+
+  # Setup ~root
+  - |
+    mkdir -p /srv/repo
+    chmod 1777 /srv/repo
+    touch /root/.hushlogin
+    systemctl daemon-reload
+    systemctl enable make-root-rshared.service
+
+  - |
+    # Final poweroff
+    shutdown --poweroff now
